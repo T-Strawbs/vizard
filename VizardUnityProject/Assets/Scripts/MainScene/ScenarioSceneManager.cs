@@ -71,12 +71,19 @@ public class ScenarioSceneManager : MonoBehaviour
 	{
 		// If playing in Editor from Main Scene, instead of going through Startup Scene)
 		// the section below is used to find a file to play back and to initialize the system
-		if (!DataManager.IsLiveSim && String.IsNullOrEmpty(DataManager.FilePath)) 
+		if (!DataManager.IsLiveSim && String.IsNullOrEmpty(DataManager.FilePath))
 		{
 			GoodEnoughAddressables.InitializeAddressables();
 			Save lastSave = DataManager.LoadUserData();
-			DataManager.FilePath = lastSave.lastFilePath;
-			MessageList.FirstMessageBuffersReadFromFile(DataManager.FilePath);
+			// Only read back a recording if there actually is one. Reading an empty
+			// path throws out of Awake before the scene is built, and because
+			// FirstMessageBuffersReadFromFile clears the message log first, it also
+			// discards messages already received from a live stream.
+			if (lastSave != null && !String.IsNullOrEmpty(lastSave.lastFilePath))
+			{
+				DataManager.FilePath = lastSave.lastFilePath;
+				MessageList.FirstMessageBuffersReadFromFile(DataManager.FilePath);
+			}
 			#if USE_NATIVE_FILE_BROWSER
 			GameObject fileBrowser = Instantiate (Resources.Load ("Prefabs/FileBrowser") as GameObject);
 			fileBrowser.GetComponent<FileBrowser>().AllowSyncCalls = true;

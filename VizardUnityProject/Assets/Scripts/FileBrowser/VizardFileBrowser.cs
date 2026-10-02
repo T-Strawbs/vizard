@@ -153,7 +153,52 @@ public class VizardFileBrowser : MonoBehaviour
             tempDirectory = newDirectory;
 
         }
+
+        AddAvailableDriveRoots(directoryTree);
         VizardGUISettings.PopulateList(directoryDropdown, directoryTree );
+    }
+
+    /// <summary>
+    /// Appends the root of every ready drive/volume to the directory dropdown so the
+    /// user can navigate off the drive the browser happens to have opened on.
+    /// </summary>
+    /// <remarks>Walking up from the current directory only ever yields ancestors on
+    /// one drive, which on Windows left files on secondary drives unreachable.</remarks>
+    private void AddAvailableDriveRoots(List<string> directoryTree)
+    {
+        DriveInfo[] drives;
+        try
+        {
+            drives = DriveInfo.GetDrives();
+        }
+        catch (Exception e)
+        {
+            Debug.Log($"Could not read the list of drives: {e.Message}");
+            return;
+        }
+
+        foreach (DriveInfo drive in drives)
+        {
+            string driveRoot;
+            try
+            {
+                if (!drive.IsReady)
+                {
+                    continue;
+                }
+                driveRoot = drive.RootDirectory.FullName;
+            }
+            catch (Exception)
+            {
+                //Drive disappeared or cannot be queried, skip it
+                continue;
+            }
+
+            if (!directoryTree.Contains(driveRoot))
+            {
+                directoryTree.Add(driveRoot);
+            }
+        }
     }
 
     private void DropdownDirectorySelected(int optionValue)

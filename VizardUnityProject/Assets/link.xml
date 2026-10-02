@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  IL2CPP managed stripping guidance.
+
+  Google.Protobuf builds its message descriptors through reflection, so the
+  members it needs can look unreachable to the stripper. Stripping them produces
+  parse failures that appear only in IL2CPP builds (WebGL in particular) while
+  working perfectly in the Editor, so the assembly is preserved wholesale.
+-->
+<linker>
+  <assembly fullname="Google.Protobuf" preserve="all"/>
+</linker>

@@ -20,7 +20,6 @@
 using System;
 using UnityEngine;
 using System.IO;
-using System.Runtime.Serialization.Formatters.Binary;
 using UnityEngine.SceneManagement;
 
 /// <summary>Manages file playback or live streaming socket settings needed to persist between scenes.</summary>
@@ -64,7 +63,17 @@ public static class DataManager
     public static bool InNoDisplayMode { get; set; } //True if rendering to screen is turned off
 
     public static string SaveMsgFileName { get; set; } = "last_run"; //Desired name to save accumulated lives messages to file
-    
+
+    /// <summary>
+    /// Where the Vizard configuration from the last run is persisted.
+    /// <remarks>Stored as JSON rather than via BinaryFormatter, which is
+    /// deprecated and unsupported under IL2CPP. In a WebGL build
+    /// persistentDataPath is backed by IndexedDB rather than a real filesystem,
+    /// but File operations against it still work.</remarks>
+    /// </summary>
+    private static string UserSaveDataPath =>
+        Path.Combine(Application.persistentDataPath, "userData.save");
+
 /// <summary>
 /// Deactivates objects displayed for in-progress playback,
 /// loads the newly selected playback file into the message buffer,
@@ -170,26 +179,38 @@ public static class DataManager
             save.lastDisplayMode = InNoDisplayMode ? "NoDisplay" : "LiveDisplay";
         }
 
-        BinaryFormatter bf = new BinaryFormatter();
-        FileStream userDataFile = File.Create(Application.persistentDataPath + "/userData.save");
-        bf.Serialize(userDataFile, save);
-        userDataFile.Close();
+        try
+        {
+            File.WriteAllText(UserSaveDataPath, JsonUtility.ToJson(save, true));
+        }
+        catch (Exception e)
+        {
+            //Not being able to remember the last configuration is not worth
+            //interrupting startup over.
+            Debug.Log($"Could not write user save data: {e.Message}");
+        }
     }
 /// <summary>
 /// Reads save data from previous Vizard use
 /// </summary>
-/// <returns></returns>
+/// <returns>Save data from the last run, or null if there is none to read</returns>
     public static Save LoadUserData()
     {
-        if (File.Exists(Application.persistentDataPath + "/userData.save"))
+        if (!File.Exists(UserSaveDataPath))
         {
-            BinaryFormatter bf = new BinaryFormatter();
-            FileStream userDataFile = File.Open(Application.persistentDataPath + "/userData.save", FileMode.Open);
-            Save save = (Save) bf.Deserialize(userDataFile);
-            userDataFile.Close();
-            return save;
+            return null;
         }
 
-        return null;
+        try
+        {
+            return JsonUtility.FromJson<Save>(File.ReadAllText(UserSaveDataPath));
+        }
+        catch (Exception e)
+        {
+            //Also catches save files written by older Vizard versions, which
+            //used BinaryFormatter. Falling back to defaults is correct here.
+            Debug.Log($"Ignoring unreadable user save data: {e.Message}");
+            return null;
+        }
     }
 }

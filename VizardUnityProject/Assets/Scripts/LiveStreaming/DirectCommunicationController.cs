@@ -19,19 +19,37 @@
 
 using System;
 using System.Collections.Generic;
-using NetMQ;
 using UnityEngine;
 using Google.Protobuf;
 using VizProtobufferMessage;
 
+// NetMQ needs System.Net.Sockets and background threads, neither of which exists
+// in a WebGL player, so the ZMQ path is compiled out of browser builds. It stays
+// available in the Editor regardless of the selected build target so that
+// desktop development is unaffected while targeting WebGL.
+#if !UNITY_WEBGL || UNITY_EDITOR
+using NetMQ;
+#endif
+
 /// <summary>
 /// Handles communication with live Basilisk simulation
+/// <remarks>Basilisk can be reached either directly over ZMQ (desktop builds)
+/// or through the Python WebSocket bridge in bridge/bsk_viz_bridge.py, which is
+/// the only option available to a WebGL build. The transport is chosen by the
+/// scheme of the address the user supplies: ws:// or wss:// selects the bridge,
+/// anything else is treated as a ZMQ address.</remarks>
 /// </summary>
 public class DirectCommunicationController : MonoBehaviour
 {
+#if !UNITY_WEBGL || UNITY_EDITOR
     private ResSocket resSocket; //Response socket, used for two-way communication
     private SubSocket subSocket; //Subscribe socket, used for receive only communication
+#endif
+    private IVizTransport bridgeTransport; //Set when connected through the WebSocket bridge instead of ZMQ
     private VizInputAccumulator vizInputs; //Vizard user inputs to live Basilisk sim to be communicated in next message
+
+    private const float InputSendInterval = 0.05f; //Seconds between user input pushes over the bridge
+    private float lastInputSentTime; //Unscaled time of the last user input push
 
     //Timing data for measuring livestreaming metrics
     private DateTime imageRequestStartTime; //System time image request received from Basilisk sim
@@ -77,6 +95,15 @@ public class DirectCommunicationController : MonoBehaviour
     /// <returns></returns>
     public bool StartCommunication(string address)
     {
+        //The bridge normalizes both Basilisk streaming modes into a single
+        //inbound stream, so the receive-only/two-way split does not apply to it.
+        if (VizWebSocketTransport.IsWebSocketAddress(address))
+        {
+            bridgeTransport = new VizWebSocketTransport(address);
+            return bridgeTransport.Connect();
+        }
+
+#if !UNITY_WEBGL || UNITY_EDITOR
         if (DataManager.SocketIsReceiveOnly) //Set up receive only socket
         {
             //Add only the NetMQ message types that can be handled in receive only
@@ -92,6 +119,60 @@ public class DirectCommunicationController : MonoBehaviour
         resSocket = new ResSocket(address, RequestCallback);
         //Start the socket
         return resSocket.Start();
+#else
+        Debug.LogError(
+            $"'{address}' is not a WebSocket address. A browser build cannot speak ZMQ, so it must " +
+            "connect through the bridge instead, for example ws://127.0.0.1:8765.");
+        return false;
+#endif
+    }
+
+    /// <summary>
+    /// Pump the bridge transport and hand over anything it has received.
+    /// <remarks>Deliberately done here on the main thread. The ZMQ sockets
+    /// deliver messages on their own listener threads, which means they touch
+    /// Vizard state off the main thread; the bridge transport queues bytes
+    /// instead and they are decoded here, where that is safe.</remarks>
+    /// </summary>
+    private void Update()
+    {
+        if (bridgeTransport == null)
+        {
+            return;
+        }
+
+        bridgeTransport.Poll();
+
+        while (bridgeTransport.TryDequeue(out VizPayload payload))
+        {
+            switch (payload.Type)
+            {
+                case VizPayloadType.SimUpdate:
+                    HandleSimUpdate(payload.Data);
+                    break;
+                case VizPayloadType.SyncSettings:
+                    HandleSyncSettings(payload.Data);
+                    break;
+            }
+        }
+
+        //In two-way mode Basilisk asks for accumulated user input each step. The
+        //bridge answers immediately with whatever it last received, so input is
+        //pushed up as it happens rather than pulled on request. Only the newest
+        //input is ever used, so pushing at the render framerate would just waste
+        //bandwidth.
+        if (bridgeTransport.State == VizTransportState.Connected
+            && !DataManager.SocketIsReceiveOnly
+            && vizInputs != null
+            && Time.unscaledTime - lastInputSentTime >= InputSendInterval)
+        {
+            lastInputSentTime = Time.unscaledTime;
+            VizInput inputResponse = vizInputs.GetInputResponseMessage();
+            if (inputResponse != null)
+            {
+                bridgeTransport.SendInput(inputResponse.ToByteArray());
+            }
+        }
     }
 
     /// <summary>
@@ -99,6 +180,14 @@ public class DirectCommunicationController : MonoBehaviour
     /// </summary>
     public void StopSocket()
     {
+        if (bridgeTransport != null)
+        {
+            bridgeTransport.Close();
+            bridgeTransport = null;
+            return;
+        }
+
+#if !UNITY_WEBGL || UNITY_EDITOR
         if (DataManager.SocketIsReceiveOnly)
         {
             subSocket.Stop();
@@ -109,8 +198,38 @@ public class DirectCommunicationController : MonoBehaviour
         }
 
         NetMQConfig.Cleanup();
+#endif
     }
 
+    /// <summary>
+    /// Handles a serialized VizMessage, whatever transport carried it.
+    /// </summary>
+    /// <param name="data">Serialized VizMessage protobuf</param>
+    private void HandleSimUpdate(byte[] data)
+    {
+        VizMessage vizMessage = VizMessage.Parser.ParseFrom(data);
+        //Add it to the message dictionary in MessageList
+        MessageList.AddLiveMessage(vizMessage);
+        //If the settings message has not been received yet and this message includes VizMessage.Settings
+        if ((!MessageList.SettingsMessageReceived) && (vizMessage.Settings != null))
+        {
+            //Set the included Settings to be part of the first message in the dictionary
+            MessageList.AddSettingsMessageToFirstMessage(vizMessage);
+        }
+    }
+
+    /// <summary>
+    /// Handles serialized broadcast sync settings, whatever transport carried them.
+    /// </summary>
+    /// <param name="data">Serialized VizBroadcastSyncSettings protobuf</param>
+    private void HandleSyncSettings(byte[] data)
+    {
+        VizBroadcastSyncSettings syncSettings = VizBroadcastSyncSettings.Parser.ParseFrom(data);
+        //Apply the latest sync settings to the broadcast viewer's Vizard instance
+        MessageList.LatestBroadcastSyncSettings = syncSettings;
+    }
+
+#if !UNITY_WEBGL || UNITY_EDITOR
     /// <summary>
     /// Returns the correct response for a Basilisk request message
     /// </summary>
@@ -215,32 +334,50 @@ public class DirectCommunicationController : MonoBehaviour
         //Set flag to request camera image for instrument camera matching cameraID
         AtomicImageBuffer.RequestScreenshot(cameraID);
     }
+#endif
 
     /// <summary>
     /// Shut down communication and save accumulated VizMessages to file
     /// </summary>
     private void OnApplicationQuit()
     {
-        if (DataManager.IsLiveSim)
+        if (!DataManager.IsLiveSim)
         {
-            MessageList.SaveMessages("last_run.bin");
-
-            if (!DataManager.SocketIsReceiveOnly)
-            {
-                resSocket.Stop();
-            }
-            else
-            {
-                if (subSocket != null)
-                {
-                    subSocket.Stop();
-                }
-            }
-
-            NetMQConfig.Cleanup();
+            return;
         }
+
+        if (bridgeTransport != null)
+        {
+            //A browser has no writable filesystem to save the run to, so the
+            //accumulated messages are simply dropped on exit.
+#if !UNITY_WEBGL || UNITY_EDITOR
+            MessageList.SaveMessages("last_run.bin");
+#endif
+            bridgeTransport.Close();
+            bridgeTransport = null;
+            return;
+        }
+
+#if !UNITY_WEBGL || UNITY_EDITOR
+        MessageList.SaveMessages("last_run.bin");
+
+        if (!DataManager.SocketIsReceiveOnly)
+        {
+            resSocket.Stop();
+        }
+        else
+        {
+            if (subSocket != null)
+            {
+                subSocket.Stop();
+            }
+        }
+
+        NetMQConfig.Cleanup();
+#endif
     }
 
+#if !UNITY_WEBGL || UNITY_EDITOR
     /// <summary>
     /// Handles receiving a VizMessage in two-way communication
     /// </summary>
@@ -262,31 +399,17 @@ public class DirectCommunicationController : MonoBehaviour
     private void ReceiveVizMessageSubSocket(NetMQMessage message)
     {
         string messageTopicReceived = message[0].ConvertToString();
-        //If receiving a VizMessage protobuffer message:
+        //Basilisk broadcast socket doesn't bother with empty frames between header and payload
         if (messageTopicReceived == "SIM_UPDATE")
         {
-            //Basilisk broadcast socket doesn't bother with empty frames between header and VizMessage
-            byte[] data = message[1].ToByteArray();
-            //Parse the vizMessage from the frame
-            VizMessage vizMessage = VizMessage.Parser.ParseFrom(data);
-            //Add it to the message dictionary in MessageList
-            MessageList.AddLiveMessage(vizMessage);
-            //If the settings message has not been received yet and this message includes VizMessage.Settings
-            if ((!MessageList.SettingsMessageReceived) && (vizMessage.Settings != null))
-            {
-                //Set the included Settings to be part of the first message in the dictionary
-                MessageList.AddSettingsMessageToFirstMessage(vizMessage);
-            }
+            HandleSimUpdate(message[1].ToByteArray());
         }
         //If receiving settings that should be applied to keep broadcast viewers in-sync with the
         //current Vizard view settings of the instructor
         else if (messageTopicReceived == "SYNC_SETTINGS")
         {
-            byte[] data = message[1].ToByteArray();
-            //Parse the sync settings from the frame
-            VizBroadcastSyncSettings syncSettings = VizBroadcastSyncSettings.Parser.ParseFrom(data);
-            //Apply the latest sync settings to the broadcast viewer's Vizard instance
-            MessageList.LatestBroadcastSyncSettings = syncSettings;
+            HandleSyncSettings(message[1].ToByteArray());
         }
     }
+#endif
 }

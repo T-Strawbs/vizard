@@ -18,6 +18,7 @@
  */
 
 using System;
+using System.Collections;
 using UnityEngine;
 using UnityEngine.UI;
 using UnityEngine.SceneManagement;
@@ -55,6 +56,11 @@ public class StartUpScreenManager : MonoBehaviour
     public DirectCommunicationController directCommController;
 
     private Save lastSave; // Vizard Configuration data from last use (used to set up Startup Screen GUI)
+
+    // How long to wait for the first scenario messages before giving up. The old
+    // value of half a second suited a local ZMQ socket; a WebSocket to the bridge
+    // has a handshake to complete first, so it needs materially longer.
+    private const float ConnectionTimeoutSeconds = 10f;
 
     private readonly Color
         inactiveTextColor = new Color(0.3962f, 0.3868f, 0.3868f, 1f); //Text color for inactive GUI components
@@ -320,12 +326,27 @@ public class StartUpScreenManager : MonoBehaviour
             return;
         }
 
-        DateTime startTime = DateTime.Now;
+        StartCoroutine(WaitForFirstMessagesThenLoadScene());
+    }
+
+    /// <summary>
+    /// Waits for the first scenario messages to arrive, then loads the main scene.
+    /// </summary>
+    /// <remarks>
+    /// This yields rather than sleeping the main thread. The ZMQ sockets deliver on
+    /// their own listener threads, so a blocking wait still saw messages arrive, but
+    /// a WebGL build has no threads: messages are delivered from the browser into
+    /// <see cref="DirectCommunicationController"/> during Update, which cannot run
+    /// while the main thread is blocked. Sleeping here therefore guaranteed the
+    /// timeout in a browser, no matter how healthy the connection was.
+    /// </remarks>
+    private IEnumerator WaitForFirstMessagesThenLoadScene()
+    {
+        float startTime = Time.realtimeSinceStartup;
+
         while (MessageList.TimestepsTotal < 1)
         {
-            Debug.Log("Waiting for messages to load.");
-            TimeSpan interval = DateTime.Now - startTime;
-            if (interval.TotalSeconds > 0.5)
+            if (Time.realtimeSinceStartup - startTime > ConnectionTimeoutSeconds)
             {
                 Debug.Log("Timed out waiting for messages to load.");
                 if (DataManager.IsLiveSim)
@@ -335,27 +356,26 @@ public class StartUpScreenManager : MonoBehaviour
                     directCommController.StopSocket();
                 }
 
-                return;
+                yield break;
             }
 
-            System.Threading.Thread.Sleep(50);
+            yield return null;
         }
 
         if (DataManager.IsLiveSim && DataManager.SocketIsReceiveOnly)
         {
             while (!MessageList.SettingsMessageReceived)
             {
-                Debug.Log("Waiting on settings message.");
-                TimeSpan interval = DateTime.Now - startTime;
-                if (interval.TotalSeconds > 0.5)
+                if (Time.realtimeSinceStartup - startTime > ConnectionTimeoutSeconds)
                 {
                     MessageList.SettingsMessageReceived = true;
                     VizardGUISettings.UpdateErrorMessages(
-                        "Setting message was not received within the first four seconds of Receive Only live streaming and could not be applied.",
+                        $"Settings message was not received within {ConnectionTimeoutSeconds} seconds of " +
+                        "Receive Only live streaming and could not be applied.",
                         true);
                 }
 
-                System.Threading.Thread.Sleep(50);
+                yield return null;
             }
         }
 

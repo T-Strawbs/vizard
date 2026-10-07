@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en-us">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+  <title>{{{ PRODUCT_NAME }}}</title>
+  <style>
+    /* Fill whatever the host sizes us to. The embedding page owns layout; this
+       page is only ever the contents of an iframe or a full window. */
+    html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #000; }
+    #unity-container { position: absolute; inset: 0; }
+    #unity-canvas { width: 100%; height: 100%; display: block; background: #000; }
+    #unity-loading {
+      position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+      font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; color: #9aa0a8;
+      background: #000; transition: opacity .3s ease; pointer-events: none;
+    }
+    #unity-loading.done { opacity: 0; }
+    #unity-bar { width: 200px; height: 3px; background: #2a2f36; border-radius: 2px; overflow: hidden; margin-top: 10px; }
+    #unity-bar-fill { width: 0; height: 100%; background: #6fa8f5; transition: width .2s ease; }
+    #unity-loading .inner { text-align: center; }
+    #unity-warning { position: absolute; left: 0; right: 0; top: 0; z-index: 10; }
+  </style>
+</head>
+<body>
+  <div id="unity-container">
+    <canvas id="unity-canvas" width={{{ WIDTH }}} height={{{ HEIGHT }}} tabindex="-1"></canvas>
+    <div id="unity-loading"><div class="inner">Loading {{{ PRODUCT_NAME }}}<div id="unity-bar"><div id="unity-bar-fill"></div></div></div></div>
+    <div id="unity-warning"></div>
+  </div>
+
+  <script>
+  // Vizard embed template.
+  //
+  // Differences from Unity's default template:
+  //   - the canvas fills its container instead of a fixed 960x600 box, and the
+  //     Unity footer/logo chrome is gone, because this is embedded in a host page
+  //   - the instance is published as window.unityInstance so a host can drive it
+  //   - it connects itself to the Basilisk bridge from the ?ws= query parameter
+  //   - progress and status are posted to the parent window
+  //
+  // Vizard's startup screen is bypassed by sending the address straight to the
+  // StartupScene's UI objects. Those names come from VizardStartupScene.unity:
+  // "SocketAddressInputField" holds the TMP_InputField, "StartupScreenManager"
+  // holds StartUpScreenManager.
+  (function () {
+    var canvas = document.querySelector("#unity-canvas");
+    var loading = document.querySelector("#unity-loading");
+    var barFill = document.querySelector("#unity-bar-fill");
+
+    function post(type, detail) {
+      if (window.parent !== window) {
+        try { window.parent.postMessage(Object.assign({ type: type }, detail || {}), "*"); } catch (e) {}
+      }
+    }
+
+    function unityShowBanner(msg, type) {
+      var banner = document.querySelector("#unity-warning");
+      var div = document.createElement("div");
+      div.innerHTML = msg;
+      div.style = "padding:10px;font:13px system-ui,sans-serif;" +
+                  (type === "error" ? "background:#b3261e;color:#fff;"
+                                    : "background:#e0a33a;color:#000;");
+      banner.appendChild(div);
+      post("vizard-banner", { message: msg, level: type || "info" });
+      if (type !== "error") {
+        setTimeout(function () { try { banner.removeChild(div); } catch (e) {} }, 5000);
+      }
+    }
+
+    var buildUrl = "Build";
+    var config = {
+      arguments: [],
+      dataUrl: buildUrl + "/{{{ DATA_FILENAME }}}",
+      frameworkUrl: buildUrl + "/{{{ FRAMEWORK_FILENAME }}}",
+      codeUrl: buildUrl + "/{{{ CODE_FILENAME }}}",
+      streamingAssetsUrl: "StreamingAssets",
+      companyName: {{{ JSON.stringify(COMPANY_NAME) }}},
+      productName: {{{ JSON.stringify(PRODUCT_NAME) }}},
+      productVersion: {{{ JSON.stringify(PRODUCT_VERSION) }}},
+      showBanner: unityShowBanner,
+      autoSyncPersistentDataPath: true
+    };
+
+    var params = new URLSearchParams(location.search);
+    // "none" leaves Vizard's own startup screen up, for picking a source by hand.
+    var bridgeUrl = params.get("ws") || "ws://127.0.0.1:8765";
+
+    post("vizard-loading", { progress: 0 });
+
+    var script = document.createElement("script");
+    script.src = buildUrl + "/{{{ LOADER_FILENAME }}}";
+    script.onload = function () {
+      createUnityInstance(canvas, config, function (progress) {
+        barFill.style.width = (100 * progress) + "%";
+        post("vizard-loading", { progress: progress });
+      }).then(function (unityInstance) {
+        loading.classList.add("done");
+        setTimeout(function () { loading.style.display = "none"; }, 400);
+
+        window.unityInstance = unityInstance;
+        post("vizard-ready", { ws: bridgeUrl });
+
+        if (bridgeUrl === "none") {
+          return;
+        }
+        // A short delay lets the StartupScene finish waking before its objects
+        // are messaged; SendMessage to an object that does not exist yet is
+        // silently dropped.
+        setTimeout(function () {
+          unityInstance.SendMessage("SocketAddressInputField", "SetTextWithoutNotify", bridgeUrl);
+          unityInstance.SendMessage("StartupScreenManager", "SocketAddressFieldChange", bridgeUrl);
+          unityInstance.SendMessage("StartupScreenManager", "StartVisualizationButtonClicked");
+          post("vizard-connecting", { ws: bridgeUrl });
+        }, 500);
+      }).catch(function (message) {
+        unityShowBanner(String(message), "error");
+        post("vizard-error", { message: String(message) });
+      });
+    };
+    script.onerror = function () {
+      unityShowBanner("Failed to load the Vizard build. Is it being served from this path?", "error");
+      post("vizard-error", { message: "loader script failed to load" });
+    };
+    document.body.appendChild(script);
+  })();
+  </script>
+</body>
+</html>

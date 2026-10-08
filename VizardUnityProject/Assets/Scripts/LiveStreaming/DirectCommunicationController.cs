@@ -61,6 +61,16 @@ public class DirectCommunicationController : MonoBehaviour
 
     public List<string> messageSubscriptions = new List<string>(); //Message types that socket is subscribed to
 
+    /// <summary>
+    /// State of the bridge connection, or null when Basilisk is reached over ZMQ
+    /// (or no connection has been started). ZMQ cannot report whether anyone is
+    /// listening, so only the bridge has a state worth exposing.
+    /// </summary>
+    public VizTransportState? BridgeState => bridgeTransport?.State;
+
+    /// <summary>Why the bridge connection failed, or null.</summary>
+    public string BridgeError => bridgeTransport?.LastError;
+
     void Awake()
     {
         DontDestroyOnLoad(this.gameObject); //Keep this instance alive from StartupScene to be used in Main Scene

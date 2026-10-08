@@ -57,9 +57,11 @@ public class StartUpScreenManager : MonoBehaviour
 
     private Save lastSave; // Vizard Configuration data from last use (used to set up Startup Screen GUI)
 
-    // How long to wait for the first scenario messages before giving up. The old
-    // value of half a second suited a local ZMQ socket; a WebSocket to the bridge
-    // has a handshake to complete first, so it needs materially longer.
+    // How long to wait for a connection before giving up. Over ZMQ, Vizard cannot
+    // tell whether Basilisk is listening, so this bounds the wait for the first
+    // scenario messages. Over the bridge it bounds only the WebSocket handshake:
+    // once the socket is open the bridge is up, and silence just means the
+    // simulation has not started yet.
     private const float ConnectionTimeoutSeconds = 10f;
 
     private readonly Color
@@ -333,19 +335,57 @@ public class StartUpScreenManager : MonoBehaviour
     /// Waits for the first scenario messages to arrive, then loads the main scene.
     /// </summary>
     /// <remarks>
-    /// This yields rather than sleeping the main thread. The ZMQ sockets deliver on
+    /// <para>This yields rather than sleeping the main thread. The ZMQ sockets deliver on
     /// their own listener threads, so a blocking wait still saw messages arrive, but
     /// a WebGL build has no threads: messages are delivered from the browser into
     /// <see cref="DirectCommunicationController"/> during Update, which cannot run
     /// while the main thread is blocked. Sleeping here therefore guaranteed the
-    /// timeout in a browser, no matter how healthy the connection was.
+    /// timeout in a browser, no matter how healthy the connection was.</para>
+    /// <para>Over the bridge, an open socket waits for the first message for as long
+    /// as it takes. A page embedding Vizard is normally open before the simulation
+    /// is started, so timing out on silence would strand it on this screen even
+    /// though the data arrives moments later. A socket that closes or fails while
+    /// waiting is reported straight away instead.</para>
     /// </remarks>
     private IEnumerator WaitForFirstMessagesThenLoadScene()
     {
         float startTime = Time.realtimeSinceStartup;
+        bool overBridge = DataManager.IsLiveSim && directCommController.BridgeState.HasValue;
+        bool reportedWaiting = false;
 
         while (MessageList.TimestepsTotal < 1)
         {
+            if (overBridge)
+            {
+                VizTransportState? state = directCommController.BridgeState;
+
+                if (state == VizTransportState.Connected)
+                {
+                    if (!reportedWaiting)
+                    {
+                        errorText.color = Color.blue;
+                        errorText.text = "Connected. Waiting for the simulation to start...";
+                        reportedWaiting = true;
+                    }
+
+                    yield return null;
+                    continue;
+                }
+
+                if (state != VizTransportState.Connecting)
+                {
+                    // The panel fits one short line; the detail goes to the log.
+                    string reason = directCommController.BridgeError
+                                    ?? "the bridge closed the connection before the simulation started";
+                    Debug.Log($"Bridge connection lost while waiting for messages: {reason}");
+                    errorText.color = Color.red;
+                    errorText.text = "Lost connection to the bridge. Please try again.";
+                    directCommController.StopSocket();
+                    yield break;
+                }
+            }
+
+            // ZMQ, or a bridge socket still handshaking.
             if (Time.realtimeSinceStartup - startTime > ConnectionTimeoutSeconds)
             {
                 Debug.Log("Timed out waiting for messages to load.");
@@ -364,9 +404,12 @@ public class StartUpScreenManager : MonoBehaviour
 
         if (DataManager.IsLiveSim && DataManager.SocketIsReceiveOnly)
         {
+            // Timed from the first message, not from Start: the wait above can be
+            // long over the bridge, and would otherwise use up this one entirely.
+            float settingsWaitStart = Time.realtimeSinceStartup;
             while (!MessageList.SettingsMessageReceived)
             {
-                if (Time.realtimeSinceStartup - startTime > ConnectionTimeoutSeconds)
+                if (Time.realtimeSinceStartup - settingsWaitStart > ConnectionTimeoutSeconds)
                 {
                     MessageList.SettingsMessageReceived = true;
                     VizardGUISettings.UpdateErrorMessages(

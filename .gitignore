@@ -1,0 +1,3 @@
+# WebGL build output. ~65 MB per build, and every rebuild committed would add
+# that to the history for good. Copy it into whatever serves it instead.
+/vizardBuilds/

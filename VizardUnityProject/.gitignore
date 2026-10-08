@@ -80,7 +80,10 @@ crashlytics-build.properties
 /Assets/Resources/Prefabs/FileBrowser*
 
 # Large Asset Packages that can be locally loaded by user
-/[Aa]ssets/[Tt]ext[Mm]esh [Pp]ro*
+# TextMesh Pro's Essential Resources are tracked: without TMP Settings.asset a
+# build has no default font and every label renders blank. Only the optional
+# Examples & Extras are left out.
+/[Aa]ssets/[Tt]ext[Mm]esh [Pp]ro/[Ee]xamples & [Ee]xtras*
 /[Aa]ssets/[Oo]culus/*
 /[Aa]ssets/[Oo]culus.meta
 
